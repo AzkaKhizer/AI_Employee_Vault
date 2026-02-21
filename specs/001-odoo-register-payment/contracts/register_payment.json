@@ -1,0 +1,96 @@
+{
+  "tool": "register_payment",
+  "version": "1.0.0",
+  "description": "Register a payment against a posted Odoo customer invoice. Creates, posts, and reconciles an account.payment via the account.payment.register wizard. Never auto-posts invoices. Prevents overpayment, negative amounts, and payments on draft or already-paid invoices.",
+
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "invoice_number": {
+        "type": "string",
+        "description": "Invoice number as displayed in Odoo (e.g. INV/2026/00001). Must match a posted customer invoice.",
+        "minLength": 1
+      },
+      "amount": {
+        "type": "number",
+        "description": "Payment amount in the invoice's currency. Must be greater than 0 and must not exceed the invoice outstanding balance.",
+        "exclusiveMinimum": 0
+      },
+      "journal_name": {
+        "type": "string",
+        "description": "Name of the accounting journal to use for the payment. Must be a Cash or Bank type journal. Defaults to 'Cash' if not provided.",
+        "default": "Cash"
+      }
+    },
+    "required": ["invoice_number", "amount"]
+  },
+
+  "outputSchema": {
+    "oneOf": [
+      {
+        "title": "Success",
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "enum": ["payment_registered"] },
+          "invoice": { "type": "string", "description": "The invoice number payment was applied to" },
+          "amount_paid": { "type": "number", "description": "The amount registered (2dp precision)" },
+          "remaining_balance": { "type": "number", "description": "Invoice outstanding balance after payment (2dp precision)" }
+        },
+        "required": ["status", "invoice", "amount_paid", "remaining_balance"]
+      },
+      {
+        "title": "Already Paid",
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "enum": ["already_paid"] },
+          "invoice": { "type": "string" },
+          "remaining_balance": { "type": "number", "enum": [0] }
+        },
+        "required": ["status", "invoice", "remaining_balance"]
+      },
+      {
+        "title": "Error",
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "enum": [
+              "invalid_amount",
+              "invoice_not_found",
+              "invoice_not_posted",
+              "overpayment_not_allowed",
+              "journal_not_found"
+            ]
+          },
+          "detail": { "type": "string", "description": "Human-readable error description" },
+          "invoice_number": { "type": "string" }
+        },
+        "required": ["error", "detail"]
+      }
+    ]
+  },
+
+  "errorCodes": {
+    "invalid_amount": "amount is zero, negative, or not a number",
+    "invoice_not_found": "No posted customer invoice matches the given invoice_number",
+    "invoice_not_posted": "Invoice found but is in draft/cancelled state (should not occur due to domain filter; kept as explicit guard)",
+    "overpayment_not_allowed": "amount exceeds the invoice outstanding balance (amount_residual)",
+    "journal_not_found": "No cash/bank journal matches the given journal_name"
+  },
+
+  "idempotency": "NOT idempotent. Each call creates a new payment record in Odoo. Callers must check invoice payment_state via list_unpaid_invoices before retrying.",
+
+  "sideEffects": [
+    "Creates account.payment record in Odoo",
+    "Posts the payment (transitions from draft to posted state)",
+    "Reconciles payment against invoice (reduces invoice amount_residual)",
+    "Appends entry to Vault daily log file"
+  ],
+
+  "nonGoals": [
+    "Does not auto-post draft invoices",
+    "Does not handle multi-currency conversion",
+    "Does not support vendor bill payments (in_invoice)",
+    "Does not support payment reversal or deletion"
+  ]
+}
