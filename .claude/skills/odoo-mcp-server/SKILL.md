@@ -91,13 +91,18 @@ Close a customer invoice end-to-end. Auto-posts draft invoices before payment. I
 
 Returns `{ status: "invoice_closed", invoice, paid_amount, remaining_balance: 0 }` on success.
 
-### auto_close_all_unpaid(journal_name?)
+### auto_close_all_unpaid(journal_name?, dry_run?)
 
 Batch-close all open customer invoices — both draft and posted. Queries all invoices with `state in [draft, posted]` and `payment_state != paid`, then calls `close_invoice` for each sequentially. Never throws — always returns a structured batch summary.
 
 - `journal_name`: optional, defaults to `"Cash"`
+- `dry_run`: optional boolean (default `false`). If `true`, performs a read-only preview — no payments are created and no Odoo data is modified.
 
+**Normal mode** (`dry_run: false` or omitted):
 Returns `{ status: "batch_complete", total_processed, total_closed, total_amount_reconciled, failures[] }`.
+
+**Dry-run mode** (`dry_run: true`):
+Returns `{ status: "dry_run", total_would_process, total_amount, invoices: [{ name, state, amount_residual }] }` — safe to call before committing to a batch payment.
 
 ## Security Constraints
 

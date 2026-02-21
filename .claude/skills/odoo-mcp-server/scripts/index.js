@@ -119,6 +119,7 @@ const TOOLS = [
       type: "object",
       properties: {
         journal_name: { type: "string", description: "Accounting journal name to use for all payments (e.g. Cash). Must be a Cash or Bank type journal." },
+        dry_run: { type: "boolean", description: "Preview mode. If true, no payments are created — returns what would be processed without modifying Odoo." },
       },
       required: [],
     },
@@ -432,7 +433,7 @@ async function handleCloseInvoice({ invoice_number, journal_name }) {
   };
 }
 
-async function handleAutoCloseAllUnpaid({ journal_name } = {}) {
+async function handleAutoCloseAllUnpaid({ journal_name, dry_run } = {}) {
   const r2 = (n) => Math.round(n * 100) / 100;
 
   // [1] QUERY: fetch all open customer invoices — draft and posted, excluding already-paid
@@ -448,7 +449,22 @@ async function handleAutoCloseAllUnpaid({ journal_name } = {}) {
     { order: "id asc", limit: 200 }
   );
 
-  // [2] EARLY EXIT: nothing to process
+  // [2] DRY RUN: return preview without touching Odoo write API
+  if (dry_run === true) {
+    const total_amount = r2(rawInvoices.reduce((sum, inv) => sum + inv.amount_residual, 0));
+    return {
+      status: "dry_run",
+      total_would_process: rawInvoices.length,
+      total_amount,
+      invoices: rawInvoices.map((inv) => ({
+        name: inv.name,
+        state: inv.state,
+        amount_residual: r2(inv.amount_residual),
+      })),
+    };
+  }
+
+  // [3] EARLY EXIT: nothing to process
   if (!rawInvoices.length) {
     return {
       status: "no_unpaid_invoices",
@@ -459,7 +475,7 @@ async function handleAutoCloseAllUnpaid({ journal_name } = {}) {
     };
   }
 
-  // [3] BATCH: process each invoice sequentially via handleCloseInvoice
+  // [4] BATCH: process each invoice sequentially via handleCloseInvoice
   let total_closed = 0;
   let total_amount_reconciled = 0;
   const failures = [];
@@ -484,7 +500,7 @@ async function handleAutoCloseAllUnpaid({ journal_name } = {}) {
     }
   }
 
-  // [4] BATCH SUMMARY
+  // [5] BATCH SUMMARY
   return {
     status: "batch_complete",
     total_processed: rawInvoices.length,
