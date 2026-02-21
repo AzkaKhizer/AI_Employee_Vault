@@ -82,6 +82,32 @@ Every agent action must produce a structured log entry in `/Logs/YYYY-MM-DD.json
 
 ---
 
+## Autonomy Score Weights
+
+These values control `execution_metrics.py`. Override via environment variables.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `AUTONOMY_FAILURE_PENALTY` | `20` | Points deducted per 1% failure rate |
+| `AUTONOMY_MANUAL_WEIGHT` | `5` | Points deducted per approval-required event (max 30) |
+| `AUTONOMY_TIME_SAVED_MULTIPLIER` | `0.25` | Hours saved per auto-completed task |
+
+**Score formula:**
+```
+autonomy_score = (auto_completed / total) × 100
+               − (failure_rate × FAILURE_PENALTY)
+               − min(approval_events × MANUAL_WEIGHT, 30)
+Clamped to [0, 100].
+```
+
+**Score bands:**
+- 85–100 = 🟢 STRONG — investor-grade automation
+- 65–84  = 🟡 MODERATE — solid, optimisation opportunities
+- 40–64  = 🟠 DEVELOPING — significant manual overhead remains
+- 0–39   = 🔴 WEAK — system requires immediate intervention
+
+---
+
 ## Incident Response
 
 1. Suspected credential exposure → revoke immediately, update `.env`, restart all watchers
