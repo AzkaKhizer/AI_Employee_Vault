@@ -98,6 +98,31 @@ const TOOLS = [
       required: ["invoice_number", "amount"],
     },
   },
+  {
+    name: "close_invoice",
+    description:
+      "Close a customer invoice end-to-end. Posts draft invoices automatically, then registers full payment for the outstanding balance. Idempotent — returns 'already_closed' if residual is zero. Reuses register_payment guards (journal validation, overpayment prevention, structured errors).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        invoice_number: { type: "string", description: "Invoice number as displayed in Odoo (e.g. INV/2026/00001)" },
+        journal_name: { type: "string", description: "Accounting journal name (default: Cash). Must be a Cash or Bank type journal." },
+      },
+      required: ["invoice_number"],
+    },
+  },
+  {
+    name: "auto_close_all_unpaid",
+    description:
+      "Automatically close all currently unpaid customer invoices using the close_invoice workflow. Processes each invoice sequentially, accumulates paid amounts, and returns a structured batch summary with per-invoice failure details. Never throws — always returns a structured response.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        journal_name: { type: "string", description: "Accounting journal name to use for all payments (e.g. Cash). Must be a Cash or Bank type journal." },
+      },
+      required: [],
+    },
+  },
 ];
 
 // ── Tool handlers ───────────────────────────────────────────────────
@@ -319,6 +344,156 @@ async function handleRegisterPayment({ invoice_number, amount, journal_name }) {
   };
 }
 
+async function handleCloseInvoice({ invoice_number, journal_name }) {
+  const r2 = (n) => Math.round(n * 100) / 100;
+
+  // [1] ODOO READ: lookup by name with NO state filter — handles both draft and posted
+  const invoices = await odoo.searchRead(
+    "account.move",
+    [["move_type", "=", "out_invoice"], ["name", "=", invoice_number]],
+    ["id", "name", "state", "amount_residual", "payment_state"],
+    { limit: 1 }
+  );
+
+  // [2] FAIL FAST: invoice not found
+  if (!invoices.length) {
+    return {
+      error: "invoice_not_found",
+      detail: `No customer invoice found matching "${invoice_number}".`,
+      invoice_number,
+    };
+  }
+
+  let invoice = invoices[0];
+
+  // [3] AUTO-POST: if draft, post it before proceeding
+  if (invoice.state === "draft") {
+    await odoo.call("account.move", "action_post", [[invoice.id]], {});
+    // Re-read to get updated state, residual, AND the real invoice name assigned on posting
+    // (draft invoices have name="/" until posted, e.g. INV/2026/00006)
+    const refreshed = await odoo.searchRead(
+      "account.move",
+      [["id", "=", invoice.id]],
+      ["name", "state", "amount_residual", "payment_state"],
+      { limit: 1 }
+    );
+    invoice = { ...invoice, ...refreshed[0] };
+    // Use the real assigned name for all subsequent steps — do not keep "/"
+    invoice_number = invoice.name;
+  }
+
+  // [4] IDEMPOTENCY: already fully paid — nothing to do
+  if (invoice.payment_state === "paid" || r2(invoice.amount_residual) === 0) {
+    return {
+      status: "already_closed",
+      invoice: invoice_number,
+      remaining_balance: 0,
+    };
+  }
+
+  // [5] REUSE: delegate to handleRegisterPayment with the full residual amount
+  // All guards (journal lookup, overpayment, invalid amount) are inherited — no duplication
+  const paymentResult = await handleRegisterPayment({
+    invoice_number,
+    amount: r2(invoice.amount_residual),
+    journal_name,
+  });
+
+  // [6] PROPAGATE: surface any structured error from the payment step
+  if (paymentResult.error) {
+    return paymentResult;
+  }
+
+  // [7] RECONCILIATION VERIFICATION: re-read to confirm residual is truly zero
+  // Reuses invoice.id from step [1] — no duplicate lookup logic
+  const verification = await odoo.searchRead(
+    "account.move",
+    [["id", "=", invoice.id]],
+    ["amount_residual", "payment_state"],
+    { limit: 1 }
+  );
+  const finalResidual = r2(verification[0]?.amount_residual ?? Infinity);
+
+  if (finalResidual !== 0) {
+    return {
+      error: "reconciliation_failed",
+      detail: "Payment executed but residual is not zero.",
+      invoice: invoice_number,
+      remaining_balance: finalResidual,
+    };
+  }
+
+  // [8] SUCCESS: residual confirmed zero
+  return {
+    status: "invoice_closed",
+    invoice: invoice_number,
+    paid_amount: r2(invoice.amount_residual),
+    remaining_balance: 0,
+  };
+}
+
+async function handleAutoCloseAllUnpaid({ journal_name } = {}) {
+  const r2 = (n) => Math.round(n * 100) / 100;
+
+  // [1] QUERY: fetch all open customer invoices — draft and posted, excluding already-paid
+  // Draft invoices are included because handleCloseInvoice auto-posts them before payment
+  const rawInvoices = await odoo.searchRead(
+    "account.move",
+    [
+      ["move_type", "=", "out_invoice"],
+      ["state", "in", ["draft", "posted"]],
+      ["payment_state", "!=", "paid"],
+    ],
+    ["id", "name", "state", "amount_total", "amount_residual"],
+    { order: "id asc", limit: 200 }
+  );
+
+  // [2] EARLY EXIT: nothing to process
+  if (!rawInvoices.length) {
+    return {
+      status: "no_unpaid_invoices",
+      total_processed: 0,
+      total_closed: 0,
+      total_amount_reconciled: 0,
+      failures: [],
+    };
+  }
+
+  // [3] BATCH: process each invoice sequentially via handleCloseInvoice
+  let total_closed = 0;
+  let total_amount_reconciled = 0;
+  const failures = [];
+
+  for (const inv of rawInvoices) {
+    // REUSE: delegates to handleCloseInvoice — handles draft→post→pay, all guards inherited
+    const result = await handleCloseInvoice({
+      invoice_number: inv.name,
+      journal_name,
+    });
+
+    if (result.status === "invoice_closed" || result.status === "already_closed") {
+      total_closed++;
+      // paid_amount present on invoice_closed; already_closed contributes 0 (residual was 0)
+      total_amount_reconciled += result.paid_amount ?? 0;
+    } else {
+      failures.push({
+        invoice: inv.name,
+        error: result.error,
+        detail: result.detail ?? null,
+      });
+    }
+  }
+
+  // [4] BATCH SUMMARY
+  return {
+    status: "batch_complete",
+    total_processed: rawInvoices.length,
+    total_closed,
+    total_amount_reconciled: r2(total_amount_reconciled),
+    failures,
+  };
+}
+
 // ── Dispatch map ────────────────────────────────────────────────────
 const HANDLERS = {
   create_draft_invoice: handleCreateDraftInvoice,
@@ -326,6 +501,8 @@ const HANDLERS = {
   get_revenue_summary: handleGetRevenueSummary,
   list_expenses: handleListExpenses,
   register_payment: handleRegisterPayment,
+  close_invoice: handleCloseInvoice,
+  auto_close_all_unpaid: handleAutoCloseAllUnpaid,
 };
 
 // ── Server setup ────────────────────────────────────────────────────

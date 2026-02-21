@@ -1,6 +1,6 @@
 ---
 name: odoo-mcp-server
-description: Node.js MCP server connecting to Odoo 19+ via JSON-RPC. Exposes five tools — create_draft_invoice, list_unpaid_invoices, get_revenue_summary, list_expenses, register_payment. All monetary writes create DRAFT only (never auto-post) except register_payment which creates, posts, and reconciles payments against posted invoices. Logs all calls to Vault/Logs/YYYY-MM-DD.json. Use when the user says "create invoice", "list unpaid invoices", "revenue summary", "list expenses", "register payment", "pay invoice", "connect to Odoo", "Odoo invoices", "check outstanding invoices", or needs financial data from an Odoo 19+ instance. Requires ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD environment variables.
+description: Node.js MCP server connecting to Odoo 19+ via JSON-RPC. Exposes seven tools — create_draft_invoice, list_unpaid_invoices, get_revenue_summary, list_expenses, register_payment, close_invoice, auto_close_all_unpaid. All monetary writes create DRAFT only (never auto-post) except register_payment/close_invoice/auto_close_all_unpaid which create, post, and reconcile payments. Logs all calls to Vault/Logs/YYYY-MM-DD.json. Use when the user says "create invoice", "list unpaid invoices", "revenue summary", "list expenses", "register payment", "pay invoice", "close invoice", "close all invoices", "batch pay", "connect to Odoo", "Odoo invoices", "check outstanding invoices", or needs financial data from an Odoo 19+ instance. Requires ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD environment variables.
 ---
 
 # Odoo MCP Server
@@ -81,6 +81,23 @@ Register a payment against a posted customer invoice (creates, posts, and reconc
 - `journal_name`: optional, defaults to `"Cash"` — must be a Cash or Bank type journal
 
 Returns `{ status: "payment_registered", invoice, amount_paid, remaining_balance }` on success. Returns structured errors for invalid inputs without creating any Odoo records.
+
+### close_invoice(invoice_number, journal_name?)
+
+Close a customer invoice end-to-end. Auto-posts draft invoices before payment. Idempotent — returns `already_closed` if the residual is already zero. Reuses all `register_payment` safety guards (journal validation, overpayment prevention, structured errors). Verifies reconciliation by re-reading residual after payment.
+
+- `invoice_number`: invoice name as displayed in Odoo (e.g. `INV/2026/00001`)
+- `journal_name`: optional, defaults to `"Cash"`
+
+Returns `{ status: "invoice_closed", invoice, paid_amount, remaining_balance: 0 }` on success.
+
+### auto_close_all_unpaid(journal_name?)
+
+Batch-close all open customer invoices — both draft and posted. Queries all invoices with `state in [draft, posted]` and `payment_state != paid`, then calls `close_invoice` for each sequentially. Never throws — always returns a structured batch summary.
+
+- `journal_name`: optional, defaults to `"Cash"`
+
+Returns `{ status: "batch_complete", total_processed, total_closed, total_amount_reconciled, failures[] }`.
 
 ## Security Constraints
 
