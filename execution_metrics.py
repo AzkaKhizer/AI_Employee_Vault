@@ -41,8 +41,10 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
 # ── Vault paths ───────────────────────────────────────────────────────────────
 
 VAULT_ROOT = Path(os.getenv("VAULT_ROOT", Path(__file__).parent))
-LOG_DIR    = VAULT_ROOT / "Logs"
-DASH_FILE  = VAULT_ROOT / "Dashboard.md"
+LOG_DIR           = VAULT_ROOT / "Logs"
+DASH_FILE         = VAULT_ROOT / "Dashboard.md"
+HISTORY_FILE      = LOG_DIR / "metrics-history.json"
+MAX_HISTORY_WEEKS = 12
 
 
 # ── Autonomy Score weights (override via env or SECURITY.md config section) ───
@@ -94,6 +96,67 @@ def _load_logs(days: int) -> list[dict]:
     # Sort chronologically
     entries.sort(key=lambda e: e.get("timestamp", ""))
     return entries
+
+
+# ── History & delta functions ─────────────────────────────────────────────────
+
+def append_metrics_history(metrics: dict, revenue_collected: float = 0.0):
+    """
+    Append a slim snapshot of current metrics to HISTORY_FILE.
+    Keeps at most MAX_HISTORY_WEEKS entries (rolling window).
+    Returns the previous snapshot dict, or None on first run.
+    """
+    history = []
+    if HISTORY_FILE.exists():
+        try:
+            raw = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                history = raw
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    previous = history[-1] if history else None
+
+    snapshot = {
+        "generated_at":               metrics["generated_at"],
+        "autonomy_score":             metrics["autonomy_score"],
+        "failure_rate":               metrics["failure_rate"],
+        "approval_rate":              metrics["approval_rate"],
+        "tasks_auto_completed":       metrics["tasks_auto_completed"],
+        "total_tasks_processed":      metrics["total_tasks_processed"],
+        "estimated_time_saved_hours": metrics["estimated_time_saved_hours"],
+        "revenue_collected":          round(revenue_collected, 2),
+    }
+
+    history.append(snapshot)
+    history = history[-MAX_HISTORY_WEEKS:]
+
+    HISTORY_FILE.write_text(
+        json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return previous
+
+
+def compute_deltas(current: dict, previous: dict) -> dict:
+    """
+    Compute week-over-week signed deltas for key metrics.
+    Pass None for previous to receive a no-data dict (all values None).
+    """
+    if previous is None:
+        return {
+            "autonomy_score_delta":     None,
+            "failure_rate_delta":       None,
+            "approval_rate_delta":      None,
+            "revenue_collection_delta": None,
+        }
+    return {
+        "autonomy_score_delta":     round(current["autonomy_score"]  - previous["autonomy_score"], 1),
+        "failure_rate_delta":       round(current["failure_rate"]    - previous["failure_rate"], 1),
+        "approval_rate_delta":      round(current["approval_rate"]   - previous["approval_rate"], 1),
+        "revenue_collection_delta": round(
+            current.get("revenue_collected", 0.0) - previous.get("revenue_collected", 0.0), 2
+        ),
+    }
 
 
 # ── Metric computation ────────────────────────────────────────────────────────
@@ -278,6 +341,39 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
 _DASHBOARD_SECTION_START = "## Autonomy Metrics"
 _DASHBOARD_SECTION_END   = "---"
 
+def _trend_arrow(delta, threshold: float = 0.5) -> str:
+    """Return directional arrow: ▲ (up), ▼ (down), or → (stable)."""
+    if delta is None:
+        return "→"
+    if delta > threshold:
+        return "▲"
+    if delta < -threshold:
+        return "▼"
+    return "→"
+
+
+def _delta_str(delta, higher_is_better: bool = True) -> str:
+    """Format a delta with its trend arrow for inline display. Empty string if None."""
+    if delta is None:
+        return ""
+    arrow = _trend_arrow(delta)
+    sign  = "+" if delta >= 0 else ""
+    return f" {arrow}({sign}{delta:.1f})"
+
+
+def _momentum_label(delta, higher_is_better: bool = True) -> str:
+    """Return 🟢 Improving / 🟡 Stable / 🔴 Declining given a signed delta."""
+    if delta is None:
+        return "🟡 No prior data"
+    improving = delta > 0.5 if higher_is_better else delta < -0.5
+    declining  = delta < -0.5 if higher_is_better else delta > 0.5
+    if improving:
+        return "🟢 Improving"
+    if declining:
+        return "🔴 Declining"
+    return "🟡 Stable"
+
+
 def _score_badge(score: float) -> str:
     if score >= 85:
         return "🟢 STRONG"
@@ -288,7 +384,7 @@ def _score_badge(score: float) -> str:
     return "🔴 WEAK"
 
 
-def update_dashboard(metrics: dict) -> None:
+def update_dashboard(metrics: dict, deltas: dict = None) -> None:
     """Inject or replace the Autonomy Metrics section in Dashboard.md."""
     if not DASH_FILE.exists():
         print(f"[metrics] Dashboard.md not found at {DASH_FILE}", file=sys.stderr)
@@ -297,16 +393,21 @@ def update_dashboard(metrics: dict) -> None:
     content = DASH_FILE.read_text(encoding="utf-8")
     score   = metrics["autonomy_score"]
     days    = metrics["period_days"]
+    d       = deltas or {}
+
+    score_trend = _delta_str(d.get("autonomy_score_delta"), higher_is_better=True)
+    fail_trend  = _delta_str(d.get("failure_rate_delta"),   higher_is_better=False)
+    hitl_trend  = _delta_str(d.get("approval_rate_delta"),  higher_is_better=False)
 
     section = f"""\
 ## Autonomy Metrics (Last {days} Days)
 
 | Metric | Value |
 |--------|-------|
-| **Autonomy Score** | {score}/100 — {_score_badge(score)} |
+| **Autonomy Score** | {score}/100 — {_score_badge(score)}{score_trend} |
 | Tasks Completed | {metrics['tasks_auto_completed']} / {metrics['total_tasks_processed']} |
-| HITL Rate | {metrics['approval_rate']}% ({metrics['tasks_requiring_approval']} approvals) |
-| Failures | {metrics['execution_failures']} ({metrics['failure_rate']}%) |
+| HITL Rate | {metrics['approval_rate']}% ({metrics['tasks_requiring_approval']} approvals){hitl_trend} |
+| Failures | {metrics['execution_failures']} ({metrics['failure_rate']}%){fail_trend} |
 | Avg Iterations/Task | {metrics['average_iterations_per_task']} |
 | Estimated Hours Saved | {metrics['estimated_time_saved_hours']}h |
 | Dry-Run Calls | {metrics['dry_run_calls']} |
@@ -345,20 +446,27 @@ def save_report(metrics: dict) -> Path:
 
 # ── Human-readable summary ────────────────────────────────────────────────────
 
-def print_summary(m: dict) -> None:
+def print_summary(m: dict, deltas: dict = None) -> None:
+    d   = deltas or {}
     sep = "-" * 52
     print(f"\n{sep}")
     print(f"  AI Employee — Autonomy Intelligence Report")
     print(f"  Period: Last {m['period_days']} days  |  {m['generated_at'][:10]}")
     print(sep)
-    print(f"  Autonomy Score:         {m['autonomy_score']:>6.1f} / 100   {_score_badge(m['autonomy_score'])}")
+    print(f"  Autonomy Score:         {m['autonomy_score']:>6.1f} / 100   {_score_badge(m['autonomy_score'])}{_delta_str(d.get('autonomy_score_delta'), higher_is_better=True)}")
     print(f"  Total Tasks:            {m['total_tasks_processed']:>6}")
     print(f"  Auto-Completed:         {m['tasks_auto_completed']:>6}  ({100 - m['failure_rate'] - m['approval_rate']:.1f}% fully autonomous)")
-    print(f"  Requiring Approval:     {m['tasks_requiring_approval']:>6}  (HITL rate: {m['approval_rate']}%)")
-    print(f"  Failures:               {m['execution_failures']:>6}  ({m['failure_rate']}%)")
+    print(f"  Requiring Approval:     {m['tasks_requiring_approval']:>6}  (HITL rate: {m['approval_rate']}%){_delta_str(d.get('approval_rate_delta'), higher_is_better=False)}")
+    print(f"  Failures:               {m['execution_failures']:>6}  ({m['failure_rate']}%){_delta_str(d.get('failure_rate_delta'), higher_is_better=False)}")
     print(f"  Avg Iterations/Task:    {m['average_iterations_per_task']:>6.2f}")
     print(f"  Est. Hours Saved:       {m['estimated_time_saved_hours']:>6.2f}h")
     print(f"  Dry-Run Calls:          {m['dry_run_calls']:>6}")
+    if any(v is not None for v in d.values()):
+        print(sep)
+        print(f"  Week-over-Week Deltas:")
+        print(f"    Autonomy Score:{_delta_str(d.get('autonomy_score_delta'), higher_is_better=True) or '  → (no prior data)'}")
+        print(f"    Failure Rate:  {_delta_str(d.get('failure_rate_delta'),   higher_is_better=False) or '  → (no prior data)'}")
+        print(f"    Approval Rate: {_delta_str(d.get('approval_rate_delta'),  higher_is_better=False) or '  → (no prior data)'}")
     print(sep)
     print(f"  Score Breakdown:")
     b = m["score_breakdown"]
@@ -380,16 +488,19 @@ def main() -> None:
     parser.add_argument("--json",             action="store_true",  help="Print raw JSON")
     args = parser.parse_args()
 
-    entries = _load_logs(args.days)
-    metrics = compute_metrics(entries, args.days)
+    entries  = _load_logs(args.days)
+    metrics  = compute_metrics(entries, args.days)
+    previous = append_metrics_history(metrics)
+    deltas   = compute_deltas(metrics, previous)
+    metrics["deltas"] = deltas
 
     if args.json:
         print(json.dumps(metrics, indent=2))
     else:
-        print_summary(metrics)
+        print_summary(metrics, deltas)
 
     if args.update_dashboard:
-        update_dashboard(metrics)
+        update_dashboard(metrics, deltas)
 
     if args.save_report:
         save_report(metrics)

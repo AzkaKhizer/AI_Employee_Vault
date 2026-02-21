@@ -89,6 +89,23 @@ python orchestrator.py --once --dev --dry-run
 # auto_close_all_unpaid(dry_run=true) via MCP
 ```
 
+
+## Autonomy Metrics (Last 7 Days)
+
+| Metric | Value |
+|--------|-------|
+| **Autonomy Score** | 54.4/100 — 🟠 DEVELOPING →(+0.0) |
+| Tasks Completed | 22 / 35 |
+| HITL Rate | 2.9% (1 approvals) →(+0.0) |
+| Failures | 6 (17.1%) →(+0.0) |
+| Avg Iterations/Task | 1.0 |
+| Estimated Hours Saved | 5.5h |
+| Dry-Run Calls | 0 |
+
+*Score = auto_rate − failure_deduction(3.4) − manual_deduction(5.0)*
+*Generated: 2026-02-21T15:36:33Z*
+
+
 ---
 
 *See: [ARCHITECTURE.md](ARCHITECTURE.md) · [SECURITY.md](SECURITY.md) · [Business_Goals.md](Business_Goals.md)*

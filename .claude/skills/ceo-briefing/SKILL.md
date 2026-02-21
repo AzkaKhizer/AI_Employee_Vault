@@ -24,7 +24,8 @@ description: Generate an executive-level briefing from the current state of the 
    - Pending approval count (files in `Pending_Approval/`)
    - Completed count (files in `Done/` with Processed date within time window)
    - Priority distribution (count of High / Medium / Low across all active + pending)
-5. **Load autonomy metrics** — Run `python execution_metrics.py --days N --json` (or read the latest `Logs/metrics-report-*.json` if the script is unavailable). Extract: `autonomy_score`, `tasks_auto_completed`, `execution_failures`, `approval_rate`, `estimated_time_saved_hours`. If unavailable, note "Autonomy data not available."
+5. **Load autonomy metrics** — Run `python execution_metrics.py --days N --json` (or read the latest `Logs/metrics-report-*.json` if the script is unavailable). Extract: `autonomy_score`, `tasks_auto_completed`, `execution_failures`, `approval_rate`, `estimated_time_saved_hours`, and `deltas` sub-object. If unavailable, note "Autonomy data not available."
+5a. **Load metrics history for WoW deltas** — Read `Logs/metrics-history.json`. If it has ≥ 2 entries, use the `deltas` field from the metrics JSON (or compute manually: current − previous entry). Extract: `autonomy_score_delta`, `failure_rate_delta`, `approval_rate_delta`, `revenue_collection_delta`. Apply trend arrow logic: delta > +0.5 → ▲, delta < −0.5 → ▼, else →. If fewer than 2 history entries exist, show "→ (no prior data)" for all deltas.
 6. **Scan financial signals** — Read the latest file in `Accounting/` (JSON snapshots or CSV). Extract: overdue invoices count, total outstanding, paid this period. If unavailable, use Odoo MCP `list_unpaid_invoices` and `get_revenue_summary`.
 7. **Detect subscription waste** — Scan `Business_Goals.md` subscription table. Flag any service where Value Assessment is blank, "Unknown", or cost > PKR 5,000/month with no documented ROI.
 8. **Detect risk signals** — Apply the Risk Signal Rules below.
@@ -115,6 +116,19 @@ Output in this exact structure:
 | Est. Hours Saved | Nh | — |
 
 **Autonomy Trend:** [Improving / Stable / Declining] — [1 sentence with data point]
+
+## Momentum Signal
+
+| Dimension | Current | WoW Delta | Signal |
+|-----------|---------|-----------|--------|
+| Operational (Autonomy Score) | N/100 | ▲/▼/→(+N.N) | 🟢/🟡/🔴 |
+| Risk (Failure Rate) | N% failures | ▲/▼/→(+N.N) | 🟢/🟡/🔴 |
+| Approval Load (HITL Rate) | N% | ▲/▼/→(+N.N) | 🟢/🟡/🔴 |
+| Financial (Revenue Collected) | PKR N | ▲/▼/→(+N) | 🟢/🟡/🔴 |
+
+**Overall Trend:** [Improving / Stable / Declining] — [1 sentence identifying the single most significant delta and what it means operationally]
+
+*Signals: 🟢 Improving = moving in the right direction by >0.5 pts. 🟡 Stable = within ±0.5. 🔴 Declining = moving in the wrong direction by >0.5 pts.*
 
 ## Financial Efficiency
 
