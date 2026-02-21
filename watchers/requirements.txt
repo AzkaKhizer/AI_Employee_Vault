@@ -1,0 +1,22 @@
+# AI Employee Vault — Python Watcher Dependencies
+#
+# Install: pip install -r watchers/requirements.txt
+
+# ── Core (required for all watchers) ──────────────────────────────────────────
+# No external deps for base_watcher / filesystem_watcher / orchestrator
+# (uses stdlib only: pathlib, subprocess, json, os, time, abc, uuid)
+
+# ── Gmail watcher ──────────────────────────────────────────────────────────────
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.1.1
+google-auth-oauthlib>=1.1.0
+
+# ── WhatsApp watcher ───────────────────────────────────────────────────────────
+playwright>=1.40.0
+# After install run: playwright install chromium
+
+# ── Finance watcher ────────────────────────────────────────────────────────────
+# stdlib only for CSV; no extra deps
+
+# ── Env loading (optional but recommended) ────────────────────────────────────
+python-dotenv>=1.0.0

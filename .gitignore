@@ -3,6 +3,7 @@ dist/
 build/
 *.log
 .env*
+!.env.template
 .DS_Store
 Thumbs.db
 *.tmp
@@ -16,3 +17,26 @@ Thumbs.db
 
 # Runtime vault logs (contain live data)
 Logs/
+
+# Watcher runtime state
+watchers/__pycache__/
+watchers/*.pyc
+watchers/gmail_token.json
+watchers/whatsapp_session/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Vault runtime folders — contain live data, not source-controlled
+Inbox/
+Signals/
+In_Progress/
+Updates/
+Approved_TEMP/
+
+# Accounting runtime snapshots (keep CSV source files tracked)
+Accounting/*-snapshot.json
