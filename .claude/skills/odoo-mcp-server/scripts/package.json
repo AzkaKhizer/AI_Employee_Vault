@@ -1,0 +1,14 @@
+{
+  "name": "odoo-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for Odoo 19+ JSON-RPC integration",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "node-fetch": "^3.3.2"
+  }
+}

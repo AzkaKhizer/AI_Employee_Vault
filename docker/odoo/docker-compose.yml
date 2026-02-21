@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: odoo-postgres
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: odoo
+      POSTGRES_PASSWORD: odoo
+    volumes:
+      - odoo-pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  odoo:
+    image: odoo:17
+    container_name: odoo-web
+    depends_on:
+      - postgres
+    ports:
+      - "8069:8069"
+    environment:
+      HOST: postgres
+      PORT: 5432
+      USER: odoo
+      PASSWORD: odoo
+    volumes:
+      - odoo-filestore:/var/lib/odoo
+    restart: unless-stopped
+
+volumes:
+  odoo-pgdata:
+  odoo-filestore:
