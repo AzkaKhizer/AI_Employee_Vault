@@ -379,6 +379,13 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
         "dry_run_calls":               dry_run_calls,
         "circuit_opened_count":        circuit_opened_count,
         "circuit_blocked_count":       circuit_blocked_count,
+        # ── RPE fields (populated externally via merge) ────────────────────
+        "revenue_at_risk":             0.0,
+        "high_risk_invoice_count":     0,
+        "critical_invoice_count":      0,
+        "aging_warning_amount":        0.0,
+        "aging_high_amount":           0.0,
+        "aging_critical_amount":       0.0,
         "autonomy_score":              autonomy_score,
         "score_breakdown": {
             "base_auto_rate":          round((net_auto_completed / max(total_tasks, 1)) * 100, 1),
