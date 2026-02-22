@@ -207,6 +207,10 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
     # ── Auto-recovery tracking ────────────────────────────────────────────
     auto_recovered = 0
 
+    # ── Circuit Breaker tracking ───────────────────────────────────────────
+    circuit_opened_count  = 0
+    circuit_blocked_count = 0
+
     # ── Failure classification ────────────────────────────────────────────
     failure_breakdown: dict[str, int] = {ft: 0 for ft in FAILURE_TYPES}
 
@@ -278,6 +282,12 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
                 orch_iterations.append(iters)
                 ft = _classify_error("", event)
                 failure_breakdown[ft] = failure_breakdown.get(ft, 0) + 1
+
+            elif event == "circuit_opened":
+                circuit_opened_count += 1
+
+            elif event == "circuit_blocked":
+                circuit_blocked_count += 1
 
         # ── Watcher / filesystem entries ─────────────────────────────────
         elif "watcher" in e:
@@ -367,6 +377,8 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
         "average_iterations_per_task": round(avg_iterations, 2),
         "estimated_time_saved_hours":  round(time_saved, 2),
         "dry_run_calls":               dry_run_calls,
+        "circuit_opened_count":        circuit_opened_count,
+        "circuit_blocked_count":       circuit_blocked_count,
         "autonomy_score":              autonomy_score,
         "score_breakdown": {
             "base_auto_rate":          round((net_auto_completed / max(total_tasks, 1)) * 100, 1),
@@ -478,6 +490,8 @@ def update_dashboard(metrics: dict, deltas: dict = None) -> None:
 | Avg Iterations/Task | {metrics['average_iterations_per_task']} |
 | Estimated Hours Saved | {metrics['estimated_time_saved_hours']}h |
 | Dry-Run Calls | {metrics['dry_run_calls']} |
+| Circuit Opened | {metrics.get('circuit_opened_count', 0)} |
+| Circuit Blocked | {metrics.get('circuit_blocked_count', 0)} |
 {_failure_breakdown_md(metrics.get('failure_breakdown', {}))}
 *Score = auto_rate − failure_deduction({metrics['score_breakdown']['failure_deduction']}) − manual_deduction({metrics['score_breakdown']['manual_deduction']})*
 *Generated: {metrics['generated_at'][:19]}Z*
@@ -549,6 +563,9 @@ def print_summary(m: dict, deltas: dict = None) -> None:
     print(f"  Avg Iterations/Task:    {m['average_iterations_per_task']:>6.2f}")
     print(f"  Est. Hours Saved:       {m['estimated_time_saved_hours']:>6.2f}h")
     print(f"  Dry-Run Calls:          {m['dry_run_calls']:>6}")
+    if m.get("circuit_opened_count", 0) > 0 or m.get("circuit_blocked_count", 0) > 0:
+        print(f"  Circuit Opened:         {m.get('circuit_opened_count', 0):>6}")
+        print(f"  Circuit Blocked Tasks:  {m.get('circuit_blocked_count', 0):>6}")
     if any(v is not None for v in d.values()):
         print(sep)
         print(f"  Week-over-Week Deltas:")

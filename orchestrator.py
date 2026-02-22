@@ -64,6 +64,17 @@ CLAUDE_CLI_CMD = os.getenv("CLAUDE_CLI", "claude")  # Path to Claude Code binary
 MAX_RETRIES   = int(os.getenv("ORCH_MAX_RETRIES", "2"))
 RETRY_BACKOFF = int(os.getenv("ORCH_RETRY_BACKOFF", "30"))  # base seconds (doubles each attempt)
 
+# ── Circuit Breaker config ─────────────────────────────────────────────────────
+CIRCUIT_FAILURE_THRESHOLD = int(os.getenv("CIRCUIT_FAILURE_THRESHOLD", "5"))
+CIRCUIT_WINDOW_SECONDS    = int(os.getenv("CIRCUIT_WINDOW_SECONDS",    "600"))
+CIRCUIT_COOLDOWN_SECONDS  = int(os.getenv("CIRCUIT_COOLDOWN_SECONDS",  "300"))
+
+# ── Circuit Breaker state (module-level) ──────────────────────────────────────
+_cb_state:         str   = "closed"   # "closed" | "open" | "half_open"
+_cb_opened_at:     float = 0.0        # time.monotonic() when circuit opened
+_cb_failure_times: list  = []         # monotonic timestamps of recoverable failures
+_cb_probe_allowed: bool  = False      # True when exactly one probe task is permitted
+
 
 # ── Structured logger ─────────────────────────────────────────────────────────
 
@@ -294,6 +305,27 @@ def run_task_with_retry(
       - Exponential backoff: RETRY_BACKOFF * 2^attempt seconds between attempts
       - If all retries exhausted → write RECOVERY_REQUIRED_<task>.md to Needs_Action/
     """
+    # ── Circuit Breaker gate ──────────────────────────────────────────────────
+    cb_state = _cb_check(dry_run)
+    if cb_state == "open":
+        cooldown_remaining = max(0.0, CIRCUIT_COOLDOWN_SECONDS - (time.monotonic() - _cb_opened_at))
+        log_event("circuit_blocked", {
+            "task":                   task_name,
+            "cooldown_remaining_s":   round(cooldown_remaining, 1),
+        }, outcome="error")
+        return False, "Circuit open — task blocked during cooldown", False, 0
+
+    is_probe = False
+    if cb_state == "half_open":
+        is_probe = _cb_consume_probe(task_name, dry_run)
+        if not is_probe:
+            # Probe slot already consumed this cycle — block additional tasks
+            log_event("circuit_blocked", {
+                "task":   task_name,
+                "reason": "half_open_probe_slot_occupied",
+            }, outcome="error")
+            return False, "Circuit half-open — probe slot already in use", False, 0
+
     auto_recovered  = False
     retry_count     = 0
     last_error      = ""
@@ -308,6 +340,7 @@ def run_task_with_retry(
                 log_event("retry_success", {
                     "task": task_name, "retries_used": retry_count,
                 })
+            _cb_record_success(dry_run)
             return success, output, auto_recovered, retry_count
 
         last_error      = output
@@ -320,6 +353,18 @@ def run_task_with_retry(
                 "error":      last_error[:300],
             }, outcome="error")
             break  # No retry — surface to human immediately
+
+        # Record recoverable failure; may open/reopen circuit
+        _cb_record_failure(last_error_type, dry_run)
+
+        # If circuit just opened mid-retry, stop retrying
+        if _cb_check(dry_run) == "open":
+            log_event("retry_aborted_circuit_opened", {
+                "task":       task_name,
+                "attempt":    attempt + 1,
+                "error_type": last_error_type,
+            }, outcome="error")
+            break
 
         if attempt < MAX_RETRIES:
             retry_count += 1
@@ -335,7 +380,7 @@ def run_task_with_retry(
         else:
             retry_count += 1  # count the last failed attempt
 
-    # All retries exhausted — create a recovery task for human review
+    # All retries exhausted (or aborted) — create a recovery task for human review
     suggestions = get_correction_suggestions(last_error_type, last_error)
     _create_recovery_file(task_name, last_error_type, last_error, suggestions, dry_run)
     log_event("recovery_exhausted", {
@@ -347,11 +392,120 @@ def run_task_with_retry(
     return False, last_error, False, retry_count
 
 
+# ── Circuit Breaker helpers ───────────────────────────────────────────────────
+
+def _cb_prune_window() -> None:
+    """Remove failure timestamps outside the rolling window."""
+    global _cb_failure_times
+    cutoff = time.monotonic() - CIRCUIT_WINDOW_SECONDS
+    _cb_failure_times = [t for t in _cb_failure_times if t > cutoff]
+
+
+def _cb_record_failure(error_type: str, dry_run: bool) -> None:
+    """
+    Record a recoverable failure and open the circuit if threshold is reached.
+    No-op for non-recoverable failures or in dry_run mode.
+    """
+    global _cb_state, _cb_opened_at, _cb_failure_times, _cb_probe_allowed
+
+    if dry_run or not is_recoverable(error_type):
+        return
+
+    _cb_failure_times.append(time.monotonic())
+    _cb_prune_window()
+
+    if _cb_state == "closed" and len(_cb_failure_times) >= CIRCUIT_FAILURE_THRESHOLD:
+        _cb_state       = "open"
+        _cb_opened_at   = time.monotonic()
+        _cb_probe_allowed = False
+        log_event("circuit_opened", {
+            "failure_count":       len(_cb_failure_times),
+            "window_seconds":      CIRCUIT_WINDOW_SECONDS,
+            "cooldown_seconds":    CIRCUIT_COOLDOWN_SECONDS,
+            "failure_threshold":   CIRCUIT_FAILURE_THRESHOLD,
+        }, outcome="error")
+
+    elif _cb_state == "half_open":
+        # Probe failed — reopen the circuit
+        _cb_state       = "open"
+        _cb_opened_at   = time.monotonic()
+        _cb_probe_allowed = False
+        log_event("circuit_reopened", {
+            "reason":           "probe_failure",
+            "error_type":       error_type,
+            "cooldown_seconds": CIRCUIT_COOLDOWN_SECONDS,
+        }, outcome="error")
+
+
+def _cb_record_success(dry_run: bool) -> None:
+    """Close the circuit after a successful probe (half_open → closed)."""
+    global _cb_state, _cb_failure_times, _cb_probe_allowed
+
+    if dry_run:
+        return
+
+    if _cb_state == "half_open":
+        _cb_state         = "closed"
+        _cb_failure_times = []
+        _cb_probe_allowed = False
+        log_event("circuit_closed", {"reason": "probe_success"})
+    elif _cb_state == "closed":
+        # On healthy success in closed state, clear any stale window entries
+        _cb_prune_window()
+
+
+def _cb_check(dry_run: bool) -> str:
+    """
+    Check circuit state; transition open→half_open if cooldown elapsed.
+    Returns current state: "closed" | "open" | "half_open".
+    """
+    global _cb_state, _cb_opened_at, _cb_probe_allowed
+
+    if _cb_state == "open":
+        elapsed = time.monotonic() - _cb_opened_at
+        if elapsed >= CIRCUIT_COOLDOWN_SECONDS:
+            _cb_state         = "half_open"
+            _cb_probe_allowed = True
+            log_event("circuit_half_open", {
+                "elapsed_seconds":  round(elapsed, 1),
+                "cooldown_seconds": CIRCUIT_COOLDOWN_SECONDS,
+            })
+        # else: still cooling down
+
+    return _cb_state
+
+
+def _cb_consume_probe(task_name: str, dry_run: bool) -> bool:
+    """
+    Consume the probe slot in half_open state.
+    Returns True if task is allowed to proceed as a probe; False if slot already used.
+    """
+    global _cb_probe_allowed
+
+    if _cb_probe_allowed and not dry_run:
+        _cb_probe_allowed = False
+        log_event("circuit_probe_start", {"task": task_name})
+        return True
+    return False
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def process_cycle(max_iter: int, dev_mode: bool, dry_run: bool) -> int:
     """Process one cycle. Returns number of tasks processed."""
     reclaim_stale(dry_run)
+
+    # ── Circuit Breaker: skip entire cycle if circuit is open ────────────────
+    cb_state = _cb_check(dry_run)
+    if cb_state == "open":
+        task_files_waiting = list(NEEDS_ACTION_DIR.glob("*.md"))
+        cooldown_remaining = max(0.0, CIRCUIT_COOLDOWN_SECONDS - (time.monotonic() - _cb_opened_at))
+        log_event("circuit_blocked", {
+            "tasks_waiting":        len(task_files_waiting),
+            "cooldown_remaining_s": round(cooldown_remaining, 1),
+            "reason":               "cycle_skipped",
+        }, outcome="error")
+        return 0
 
     task_files = sorted(NEEDS_ACTION_DIR.glob("*.md"))
     if not task_files:
