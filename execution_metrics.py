@@ -30,6 +30,17 @@ import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+# Graceful import — recovery_engine.py lives in the same directory
+try:
+    sys.path.insert(0, str(Path(__file__).parent))
+    from recovery_engine import classify_error as _classify_error, FAILURE_TYPES
+    _RECOVERY_ENGINE_AVAILABLE = True
+except ImportError:
+    _RECOVERY_ENGINE_AVAILABLE = False
+    FAILURE_TYPES = frozenset({"guard_rejection", "tool_validation_error", "network_error", "timeout", "unknown"})
+    def _classify_error(error_msg: str, event: str = "") -> str:  # noqa: E302
+        return "unknown"
+
 # Force UTF-8 output on Windows (emoji badges in markdown-destined strings)
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
     try:
@@ -193,6 +204,12 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
     # ── Dry-run calls ─────────────────────────────────────────────────────
     dry_run_calls = 0
 
+    # ── Auto-recovery tracking ────────────────────────────────────────────
+    auto_recovered = 0
+
+    # ── Failure classification ────────────────────────────────────────────
+    failure_breakdown: dict[str, int] = {ft: 0 for ft in FAILURE_TYPES}
+
     # ── Iteration tracking (orchestrator) ────────────────────────────────
     _active_task_iterations: dict[str, int] = {}
 
@@ -215,6 +232,9 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
                     mcp_error_response += 1
             elif status == "error":
                 mcp_errors += 1
+                err_msg = e.get("result_summary", "") or e.get("error", "")
+                ft = _classify_error(err_msg, "")
+                failure_breakdown[ft] = failure_breakdown.get(ft, 0) + 1
 
         # ── Orchestrator entries ─────────────────────────────────────────
         elif "agent" in e or e.get("watcher") == "orchestrator":
@@ -231,14 +251,33 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
                 task = e.get("task", "")
                 _active_task_iterations[task] = _active_task_iterations.get(task, 0) + 1
 
-            elif event in ("claude_error", "claude_timeout", "release_failed"):
+            elif event == "retry_success":
+                # A recoverable failure was retried and ultimately succeeded
+                auto_recovered += 1
+
+            elif event == "claude_error":
                 orch_tasks_failed += 1
+                err_msg = e.get("stderr", "") or e.get("error", "")
+                ft = _classify_error(err_msg, event)
+                failure_breakdown[ft] = failure_breakdown.get(ft, 0) + 1
+
+            elif event == "claude_timeout":
+                orch_tasks_failed += 1
+                ft = _classify_error("", event)
+                failure_breakdown[ft] = failure_breakdown.get(ft, 0) + 1
+
+            elif event == "release_failed":
+                orch_tasks_failed += 1
+                ft = _classify_error("", event)
+                failure_breakdown[ft] = failure_breakdown.get(ft, 0) + 1
 
             elif event == "max_iter_reached":
                 orch_max_iter += 1
                 task = e.get("task", "")
                 iters = _active_task_iterations.pop(task, e.get("max_iter", 10))
                 orch_iterations.append(iters)
+                ft = _classify_error("", event)
+                failure_breakdown[ft] = failure_breakdown.get(ft, 0) + 1
 
         # ── Watcher / filesystem entries ─────────────────────────────────
         elif "watcher" in e:
@@ -250,9 +289,13 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
                     watcher_tasks += 1
                 else:
                     watcher_errors += 1
+                    ft = _classify_error("", event)
+                    failure_breakdown[ft] = failure_breakdown.get(ft, 0) + 1
 
             elif event in ("poll_error", "process_error", "watcher_died"):
                 watcher_errors += 1
+                ft = _classify_error("", event)
+                failure_breakdown[ft] = failure_breakdown.get(ft, 0) + 1
 
         # ── Approval pipeline entries ────────────────────────────────────
         if e.get("event") == "write_needs_action" or e.get("tool") in (
@@ -280,23 +323,29 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
     mcp_total    = mcp_auto_ok + mcp_error_response + mcp_errors
     total_tasks  = mcp_total + orch_tasks_complete + orch_tasks_failed + orch_max_iter + watcher_tasks
 
-    auto_completed       = mcp_auto_ok + orch_tasks_complete + watcher_tasks
-    tasks_req_approval   = approval_requests
-    execution_failures   = mcp_errors + orch_tasks_failed + orch_max_iter + watcher_errors
+    auto_completed     = mcp_auto_ok + orch_tasks_complete + watcher_tasks
+    tasks_req_approval = approval_requests
+    execution_failures = mcp_errors + orch_tasks_failed + orch_max_iter + watcher_errors
 
-    failure_rate = execution_failures / max(total_tasks, 1)
+    # Auto-recovered failures count as successes for scoring purposes
+    net_failures       = max(0, execution_failures - auto_recovered)
+    net_auto_completed = auto_completed + auto_recovered
+    auto_recovery_rate = round(
+        (auto_recovered / execution_failures * 100) if execution_failures > 0 else 100.0, 1
+    )
+
+    failure_rate  = net_failures / max(total_tasks, 1)
     approval_rate = tasks_req_approval / max(total_tasks, 1)
     avg_iterations = (
         sum(orch_iterations) / len(orch_iterations) if orch_iterations else 1.0
     )
-    time_saved = auto_completed * AUTONOMY_WEIGHTS["time_saved_multiplier"]
+    time_saved = net_auto_completed * AUTONOMY_WEIGHTS["time_saved_multiplier"]
 
-    # ── Autonomy Score ────────────────────────────────────────────────────
-    # manual_weight penalty applied once per approval event
+    # ── Autonomy Score (uses net figures — auto-recovered = success) ──────
     manual_deduction = min(tasks_req_approval * AUTONOMY_WEIGHTS["manual_intervention_weight"], 30)
 
     raw_score = (
-        (auto_completed / max(total_tasks, 1)) * 100
+        (net_auto_completed / max(total_tasks, 1)) * 100
         - (failure_rate * AUTONOMY_WEIGHTS["failure_penalty"])
         - manual_deduction
     )
@@ -306,19 +355,24 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
         "period_days": days,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "total_tasks_processed":       total_tasks,
-        "tasks_auto_completed":        auto_completed,
+        "tasks_auto_completed":        net_auto_completed,
         "tasks_requiring_approval":    tasks_req_approval,
         "approval_rate":               round(approval_rate * 100, 1),
         "execution_failures":          execution_failures,
+        "net_failures":                net_failures,
         "failure_rate":                round(failure_rate * 100, 1),
+        "auto_recovered":              auto_recovered,
+        "auto_recovery_rate":          auto_recovery_rate,
+        "failure_breakdown":           failure_breakdown,
         "average_iterations_per_task": round(avg_iterations, 2),
         "estimated_time_saved_hours":  round(time_saved, 2),
         "dry_run_calls":               dry_run_calls,
         "autonomy_score":              autonomy_score,
         "score_breakdown": {
-            "base_auto_rate":          round((auto_completed / max(total_tasks, 1)) * 100, 1),
+            "base_auto_rate":          round((net_auto_completed / max(total_tasks, 1)) * 100, 1),
             "failure_deduction":       round(failure_rate * AUTONOMY_WEIGHTS["failure_penalty"], 1),
             "manual_deduction":        round(manual_deduction, 1),
+            "auto_recovery_boost":     round(auto_recovered / max(total_tasks, 1) * 100, 1),
         },
         "weights_used":                AUTONOMY_WEIGHTS,
         "sub_totals": {
@@ -384,6 +438,18 @@ def _score_badge(score: float) -> str:
     return "🔴 WEAK"
 
 
+def _failure_breakdown_md(fb: dict) -> str:
+    """Return a compact markdown failure breakdown sub-table, or empty string if no failures."""
+    rows = [(ft, cnt) for ft, cnt in fb.items() if cnt > 0]
+    if not rows:
+        return ""
+    rows.sort(key=lambda x: -x[1])
+    lines = ["\n**Failure Breakdown:**\n", "| Type | Count |", "|------|-------|"]
+    for ft, cnt in rows:
+        lines.append(f"| {ft} | {cnt} |")
+    return "\n".join(lines) + "\n"
+
+
 def update_dashboard(metrics: dict, deltas: dict = None) -> None:
     """Inject or replace the Autonomy Metrics section in Dashboard.md."""
     if not DASH_FILE.exists():
@@ -408,10 +474,11 @@ def update_dashboard(metrics: dict, deltas: dict = None) -> None:
 | Tasks Completed | {metrics['tasks_auto_completed']} / {metrics['total_tasks_processed']} |
 | HITL Rate | {metrics['approval_rate']}% ({metrics['tasks_requiring_approval']} approvals){hitl_trend} |
 | Failures | {metrics['execution_failures']} ({metrics['failure_rate']}%){fail_trend} |
+| Auto-Recovered | {metrics.get('auto_recovered', 0)} (Rate: {metrics.get('auto_recovery_rate', 100.0):.1f}%) |
 | Avg Iterations/Task | {metrics['average_iterations_per_task']} |
 | Estimated Hours Saved | {metrics['estimated_time_saved_hours']}h |
 | Dry-Run Calls | {metrics['dry_run_calls']} |
-
+{_failure_breakdown_md(metrics.get('failure_breakdown', {}))}
 *Score = auto_rate − failure_deduction({metrics['score_breakdown']['failure_deduction']}) − manual_deduction({metrics['score_breakdown']['manual_deduction']})*
 *Generated: {metrics['generated_at'][:19]}Z*
 
@@ -444,6 +511,27 @@ def save_report(metrics: dict) -> Path:
     return out
 
 
+# ── Failure analysis saver ────────────────────────────────────────────────────
+
+def save_failure_analysis(metrics: dict) -> Path:
+    """Write a focused failure breakdown to /Logs/failure-analysis-YYYY-MM-DD.json."""
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    out = LOG_DIR / f"failure-analysis-{date_str}.json"
+    report = {
+        "date":               date_str,
+        "generated_at":       metrics["generated_at"],
+        "period_days":        metrics["period_days"],
+        "total_failures":     metrics["execution_failures"],
+        "net_failures":       metrics.get("net_failures", metrics["execution_failures"]),
+        "auto_recovered":     metrics.get("auto_recovered", 0),
+        "auto_recovery_rate": metrics.get("auto_recovery_rate", 100.0),
+        "failure_breakdown":  metrics.get("failure_breakdown", {}),
+    }
+    out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"[metrics] Failure analysis saved → {out}")
+    return out
+
+
 # ── Human-readable summary ────────────────────────────────────────────────────
 
 def print_summary(m: dict, deltas: dict = None) -> None:
@@ -467,6 +555,15 @@ def print_summary(m: dict, deltas: dict = None) -> None:
         print(f"    Autonomy Score:{_delta_str(d.get('autonomy_score_delta'), higher_is_better=True) or '  → (no prior data)'}")
         print(f"    Failure Rate:  {_delta_str(d.get('failure_rate_delta'),   higher_is_better=False) or '  → (no prior data)'}")
         print(f"    Approval Rate: {_delta_str(d.get('approval_rate_delta'),  higher_is_better=False) or '  → (no prior data)'}")
+    fb = m.get("failure_breakdown", {})
+    if m.get("execution_failures", 0) > 0:
+        print(sep)
+        print(f"  Failure Breakdown:  (total={m['execution_failures']}, net={m.get('net_failures', m['execution_failures'])}, recovered={m.get('auto_recovered', 0)})")
+        for ft in ("tool_validation_error", "network_error", "timeout", "guard_rejection", "unknown"):
+            cnt = fb.get(ft, 0)
+            if cnt > 0:
+                print(f"    {ft:<26} {cnt:>3}")
+        print(f"  Auto-Recovery Rate:     {m.get('auto_recovery_rate', 100.0):>5.1f}%")
     print(sep)
     print(f"  Score Breakdown:")
     b = m["score_breakdown"]
@@ -484,8 +581,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="AI Employee Vault — Autonomy Metrics Engine")
     parser.add_argument("--days",             type=int, default=7, help="Days to analyse (default: 7)")
     parser.add_argument("--update-dashboard", action="store_true",  help="Write metrics to Dashboard.md")
-    parser.add_argument("--save-report",      action="store_true",  help="Save JSON report to /Logs/")
-    parser.add_argument("--json",             action="store_true",  help="Print raw JSON")
+    parser.add_argument("--save-report",           action="store_true",  help="Save JSON report to /Logs/")
+    parser.add_argument("--save-failure-analysis", action="store_true",  help="Save failure breakdown to /Logs/failure-analysis-YYYYMMDD.json")
+    parser.add_argument("--json",                  action="store_true",  help="Print raw JSON")
     args = parser.parse_args()
 
     entries  = _load_logs(args.days)
@@ -504,6 +602,9 @@ def main() -> None:
 
     if args.save_report:
         save_report(metrics)
+
+    if args.save_failure_analysis:
+        save_failure_analysis(metrics)
 
 
 if __name__ == "__main__":

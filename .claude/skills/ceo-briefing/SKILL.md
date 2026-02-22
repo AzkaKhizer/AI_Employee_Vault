@@ -24,7 +24,8 @@ description: Generate an executive-level briefing from the current state of the 
    - Pending approval count (files in `Pending_Approval/`)
    - Completed count (files in `Done/` with Processed date within time window)
    - Priority distribution (count of High / Medium / Low across all active + pending)
-5. **Load autonomy metrics** — Run `python execution_metrics.py --days N --json` (or read the latest `Logs/metrics-report-*.json` if the script is unavailable). Extract: `autonomy_score`, `tasks_auto_completed`, `execution_failures`, `approval_rate`, `estimated_time_saved_hours`, and `deltas` sub-object. If unavailable, note "Autonomy data not available."
+5. **Load autonomy metrics** — Run `python execution_metrics.py --days N --json` (or read the latest `Logs/metrics-report-*.json` if the script is unavailable). Extract: `autonomy_score`, `tasks_auto_completed`, `execution_failures`, `net_failures`, `auto_recovered`, `auto_recovery_rate`, `failure_breakdown`, `approval_rate`, `estimated_time_saved_hours`, and `deltas` sub-object. If unavailable, note "Autonomy data not available."
+5b. **Load failure analysis** — Read the latest `Logs/failure-analysis-YYYY-MM-DD.json`. Extract `failure_breakdown` (guard_rejection, tool_validation_error, network_error, timeout, unknown counts) and `auto_recovery_rate`. If the file is absent, derive from the metrics JSON `failure_breakdown` field.
 5a. **Load metrics history for WoW deltas** — Read `Logs/metrics-history.json`. If it has ≥ 2 entries, use the `deltas` field from the metrics JSON (or compute manually: current − previous entry). Extract: `autonomy_score_delta`, `failure_rate_delta`, `approval_rate_delta`, `revenue_collection_delta`. Apply trend arrow logic: delta > +0.5 → ▲, delta < −0.5 → ▼, else →. If fewer than 2 history entries exist, show "→ (no prior data)" for all deltas.
 6. **Scan financial signals** — Read the latest file in `Accounting/` (JSON snapshots or CSV). Extract: overdue invoices count, total outstanding, paid this period. If unavailable, use Odoo MCP `list_unpaid_invoices` and `get_revenue_summary`.
 7. **Detect subscription waste** — Scan `Business_Goals.md` subscription table. Flag any service where Value Assessment is blank, "Unknown", or cost > PKR 5,000/month with no documented ROI.
@@ -112,7 +113,8 @@ Output in this exact structure:
 | Autonomy Score | N/100 | 🟢/🟡/🟠/🔴 |
 | Tasks Auto-Completed | N | — |
 | HITL Rate | N% | [low/acceptable/high] |
-| Execution Failures | N (N%) | [stable/rising] |
+| Execution Failures | N total (N net) | [stable/rising] |
+| Auto-Recovered Failures | N (Rate: N%) | 🟢/🟡/🔴 |
 | Est. Hours Saved | Nh | — |
 
 **Autonomy Trend:** [Improving / Stable / Declining] — [1 sentence with data point]
@@ -142,6 +144,17 @@ Output in this exact structure:
 
 - [Signal and brief explanation]
 - [Signal and brief explanation]
+
+**Failure Type Breakdown:**
+| Type | Count | Recoverable? |
+|------|-------|--------------|
+| tool_validation_error | N | Yes — retry |
+| network_error | N | Yes — retry |
+| timeout | N | Yes — retry |
+| guard_rejection | N | No — HITL |
+| unknown | N | No — investigate |
+
+*Auto-Recovery Rate: N% — [N failures resolved without human input]*
 
 ## Bottlenecks
 
