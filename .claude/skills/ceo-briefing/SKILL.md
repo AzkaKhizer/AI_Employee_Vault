@@ -29,6 +29,7 @@ description: Generate an executive-level briefing from the current state of the 
 5a. **Load metrics history for WoW deltas** — Read `Logs/metrics-history.json`. If it has ≥ 2 entries, use the `deltas` field from the metrics JSON (or compute manually: current − previous entry). Extract: `autonomy_score_delta`, `failure_rate_delta`, `approval_rate_delta`, `revenue_collection_delta`. Apply trend arrow logic: delta > +0.5 → ▲, delta < −0.5 → ▼, else →. If fewer than 2 history entries exist, show "→ (no prior data)" for all deltas.
 6. **Scan financial signals** — Read the latest file in `Accounting/` (JSON snapshots or CSV). Extract: overdue invoices count, total outstanding, paid this period. If unavailable, use Odoo MCP `list_unpaid_invoices` and `get_revenue_summary`.
 6a. **Revenue Protection Analysis** — Call `from finance.revenue_protection import run_revenue_protection` (or read the latest `Logs/rpe-report-*.json` if the module is unavailable). Pass the unpaid invoice list from step 6. Extract: `revenue_at_risk`, `aging_summary` (current/warning/high/critical counts and amounts), `high_risk_invoice_count`, `critical_invoice_count`. If unavailable, note "RPE data not available." Do NOT trigger file creation — use the report dict only for reading.
+6b. **Load social media metrics** — From the metrics JSON (step 5) extract: `social_drafts_created`, `social_posts_approved`, `social_posts_rejected`. Determine active platforms by scanning `Pending_Approval/` for `POST_*.md` filenames. Compute marketing delta: if metrics history has ≥ 2 entries, compare `social_drafts_created` current vs previous for ▲▼→ momentum signal. If all social metrics are 0, note "No social activity this period."
 7. **Detect subscription waste** — Scan `Business_Goals.md` subscription table. Flag any service where Value Assessment is blank, "Unknown", or cost > PKR 5,000/month with no documented ROI.
 8. **Detect risk signals** — Apply the Risk Signal Rules below.
 9. **Detect bottlenecks** — Apply the Bottleneck Rules below.
@@ -152,6 +153,16 @@ Output in this exact structure:
 - **High Risk Invoices:** N
 - **Critical Risk Invoices:** N
 - **Reminder Drafts Pending Approval:** N (in `/Pending_Approval/`)
+
+## Marketing Activity
+
+- **Social Drafts Created:** N
+- **Posts Approved:** N
+- **Posts Rejected:** N
+- **Platforms Active:** [Facebook / Instagram / X / None]
+- **Marketing Momentum:** ▲ / ▼ / → (based on drafts_created delta vs prior period)
+
+*If no social activity: "No social activity this period."*
 
 ## Risk Signals
 

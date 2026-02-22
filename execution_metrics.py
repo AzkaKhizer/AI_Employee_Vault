@@ -211,6 +211,11 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
     circuit_opened_count  = 0
     circuit_blocked_count = 0
 
+    # ── Social media tracking ─────────────────────────────────────────────
+    social_drafts_created  = 0
+    social_posts_approved  = 0
+    social_posts_rejected  = 0
+
     # ── Failure classification ────────────────────────────────────────────
     failure_breakdown: dict[str, int] = {ft: 0 for ft in FAILURE_TYPES}
 
@@ -307,6 +312,16 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
                 ft = _classify_error("", event)
                 failure_breakdown[ft] = failure_breakdown.get(ft, 0) + 1
 
+        # ── Social media entries ──────────────────────────────────────────
+        if e.get("source") == "social_mcp":
+            ev = e.get("event", "")
+            if ev == "social_draft_created":
+                social_drafts_created += 1
+            elif ev == "social_post_approved":
+                social_posts_approved += 1
+            elif ev == "social_post_rejected":
+                social_posts_rejected += 1
+
         # ── Approval pipeline entries ────────────────────────────────────
         if e.get("event") == "write_needs_action" or e.get("tool") in (
             "approval-detector", "email-executor"
@@ -386,6 +401,10 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
         "aging_warning_amount":        0.0,
         "aging_high_amount":           0.0,
         "aging_critical_amount":       0.0,
+        # ── Social media fields (populated from log events) ────────────────
+        "social_drafts_created":       social_drafts_created,
+        "social_posts_approved":       social_posts_approved,
+        "social_posts_rejected":       social_posts_rejected,
         "autonomy_score":              autonomy_score,
         "score_breakdown": {
             "base_auto_rate":          round((net_auto_completed / max(total_tasks, 1)) * 100, 1),
