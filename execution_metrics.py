@@ -405,6 +405,9 @@ def compute_metrics(entries: list[dict], days: int) -> dict:
         "social_drafts_created":       social_drafts_created,
         "social_posts_approved":       social_posts_approved,
         "social_posts_rejected":       social_posts_rejected,
+        # ── EPE fields (populated externally via merge from run_priority_cycle) ──
+        "critical_priority_tasks":     0,
+        "high_priority_tasks":         0,
         "autonomy_score":              autonomy_score,
         "score_breakdown": {
             "base_auto_rate":          round((net_auto_completed / max(total_tasks, 1)) * 100, 1),

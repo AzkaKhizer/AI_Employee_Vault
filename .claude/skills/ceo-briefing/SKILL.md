@@ -30,6 +30,7 @@ description: Generate an executive-level briefing from the current state of the 
 6. **Scan financial signals** — Read the latest file in `Accounting/` (JSON snapshots or CSV). Extract: overdue invoices count, total outstanding, paid this period. If unavailable, use Odoo MCP `list_unpaid_invoices` and `get_revenue_summary`.
 6a. **Revenue Protection Analysis** — Call `from finance.revenue_protection import run_revenue_protection` (or read the latest `Logs/rpe-report-*.json` if the module is unavailable). Pass the unpaid invoice list from step 6. Extract: `revenue_at_risk`, `aging_summary` (current/warning/high/critical counts and amounts), `high_risk_invoice_count`, `critical_invoice_count`. If unavailable, note "RPE data not available." Do NOT trigger file creation — use the report dict only for reading.
 6b. **Load social media metrics** — From the metrics JSON (step 5) extract: `social_drafts_created`, `social_posts_approved`, `social_posts_rejected`. Determine active platforms by scanning `Pending_Approval/` for `POST_*.md` filenames. Compute marketing delta: if metrics history has ≥ 2 entries, compare `social_drafts_created` current vs previous for ▲▼→ momentum signal. If all social metrics are 0, note "No social activity this period."
+6c. **Run Executive Priority Engine** — Call `from executive.priority_engine import run_priority_cycle`. Build raw_tasks list from: unpaid invoices (domain="finance"), pending social drafts (domain="marketing"), files in `Pending_Approval/` (domain="approval", days_pending from mtime). Extract `critical_count`, `high_count`, `top_tasks`. Merge `critical_priority_tasks` and `high_priority_tasks` into metrics dict. If module unavailable, use the `critical_priority_tasks` and `high_priority_tasks` fields from the metrics JSON directly.
 7. **Detect subscription waste** — Scan `Business_Goals.md` subscription table. Flag any service where Value Assessment is blank, "Unknown", or cost > PKR 5,000/month with no documented ROI.
 8. **Detect risk signals** — Apply the Risk Signal Rules below.
 9. **Detect bottlenecks** — Apply the Bottleneck Rules below.
@@ -163,6 +164,18 @@ Output in this exact structure:
 - **Marketing Momentum:** ▲ / ▼ / → (based on drafts_created delta vs prior period)
 
 *If no social activity: "No social activity this period."*
+
+## Executive Priority Overview
+
+- **Critical Tasks:** N
+- **High Priority Tasks:** N
+
+### Top Executive Attention Items:
+1. [Task ID] — [Domain] — Score X (CRITICAL/HIGH)
+2. [Task ID] — [Domain] — Score X
+3. ...
+
+*If none: "No critical tasks at this time."*
 
 ## Risk Signals
 
